@@ -17,20 +17,21 @@ from time import time
 from torchvision import datasets, transforms
 from torch import nn, optim
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 
 # transforms.Compose applies a bunch of transformations onto an image right after eachother
 # transform.ToTensor() turns the image into numbers by splitting the image into RGB 0-255, and then flattening that into 0-1
-# transforms.Normalize(0.5, 0.5) shifts the pixel values so instead of ranging from 0 to 1, now they range from -1 to 1, the two parameters are to subtract the value by 0.5, and then divide it by 0.5, this centers the pixel values around 0
+# transforms.Normalize(0.5, 0.5) shifts the pixel values so instead of ranging from 0 to 1, now they range from -1 to 1 
 transform = transforms.Compose([transforms.ToTensor(), 
-                                transforms.Normalize((0.5), (0.5)),])
+                                transforms.Normalize((0.1307,), (0.3081,))])
 
 
 
 # downloading the training set: MNIST is the set
 training_data = datasets.MNIST(
     # where to store the pictures
-    root = "/Users/salar/data",
+    root = "/Users/salar/handwritten_digit_classifier_dir/data",
     # this is a training data set
     train = True,
     # download the data from the internet if its not at 'root'
@@ -41,7 +42,7 @@ training_data = datasets.MNIST(
 # downloading the test set
 testing_data = datasets.MNIST(
     # where to store the pictures
-    root = "/Users/salar/data",
+    root = "/Users/salar/handwritten_digit_classifier_dir/data",
     # this is a testing data set
     train = False,
     # download the data from the internet if its not at 'root'
@@ -62,43 +63,48 @@ test_dataloader = DataLoader(
                              batch_size = 64, 
                              shuffle = True)
 
+# SEE THE SHAPE OF THE TENSORS BELOW
 
+#for batch_id, (images, labels) in enumerate(test_dataloader):
+    #print(batch_id, images.shape, labels.shape)
+    # print(image.shape) - torch.Size([64, 1, 28, 28]) 64 images in one batch, 1 channel (grayscale),  28x28 pixels, this is a 4d tensor
+    # print(labels.shape) - torch.Size([64]) 64 labels because 64 images in one batch
 
+# SEE THE ACTUAL MNIST IMAGES BELOW
 
-#print(image.shape) - torch.Size([64, 1, 28, 28]) 64 images in one batch, 28x28 pixels
-#print(labels.shape) - 64 labels because 64 images in one batch
+# images, labels = next(iter(test_dataloader))
+# plt.imshow(images[0].squeeze(), cmap = "gray")
+# plt.title(f"Label: {labels[0]}")
+# plt.show()
 
-"""
-figure = plt.figure()
-num_of_images = 60
-for index in range(1, num_of_images + 1):
-    plt.subplot(6, 10, index)
-    plt.axis('off')
-    plt.imshow(image[index].numpy().squeeze(), cmap='gray_r')
-    
-plt.show()
-"""
 
 # 784 = 28*28 for each pixel
 # 128 --> 64 hidden layer sizes
 # output size = 10 - one for each digit
 
-# nn.Sequential creates the neural network as a sequence of layers
-model = nn.Sequential(
-                    nn.Linear(784, 128),
-                    # activation function - ReLU just means that if the output is negative, round it to 0, and if it's positive, then leave it
-                    nn.ReLU(),
-                    nn.Linear(128, 128),
-                    nn.ReLU(),
-                    nn.Linear(128, 128),
-                    nn.ReLU(),
-                    nn.Linear(128, 64),
-                    nn.ReLU(),
-                    nn.Linear(64, 10),
-                    # Converts the outputs into log-probabilities for each class, which are used for classification.
-                    nn.LogSoftmax(dim=1)
-                    )
 
+class NeuralNet(nn.Module):
+    def __init__(self):
+        super(NeuralNet, self).__init__()
+        # conv layer 1 - 1 chantelnel input (grayscale), 10 channels of output, 5x5 filters scanning the image)
+        self.conv1 = nn.Conv2d(1, 10, kernel_size = 5)
+        self.conv2 = nn.Conv2d(10, 20, kernel_size = 5)
+        # some 5x5 filters are turned off in this layer
+        self.conv2d_droplayer = nn.Dropout2d()
+        self.fc1 = nn.Linear(320, 50)
+        self.fc2 = nn.Linear(50, 10)
+        
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2d_droplayer(self.conv2(x)), 2))        
+        x = x.view(-1, 320)
+        x = F.relu(self.fc1(x))
+        x = F.dropout(x, training = self.training)
+        x = self.fc2(x)
+        return F.log_softmax(x, dim=1)
+    
+
+network = NeuralNet()
 
 # Building a training and testing loop
     # 0. Loop through the data
@@ -112,38 +118,47 @@ model = nn.Sequential(
 # torch.optim is the syntax to initialize a optimizer
 # params = model.parameters() specifies that the optim will update the params of model
 # learning rate is how big a step the optim will take each step
-optimizer = torch.optim.SGD(params = model.parameters(), lr = 0.01)
-# using negative log-likelihood loss function
-criterion = nn.NLLLoss()
-# fetches one batch (64) of images with their labels
-image, labels = next(iter(train_dataloader))
-# this flattens the image from a 28x28 square to a 782-dimensional vector
-image = image.view(image.shape[0], -1)
-# this passes the 78-dimensional vector to the neural network, and computes the log-probability for each class (0-9)
-logps = model(image)
-# this uses the NLLLoss to compare the model's log-probs with actual labels and compute the negative log-likelihood
-loss = criterion(logps, labels) 
+optimizer = optim.SGD(network.parameters(), lr = 0.01, momentum = 0.05)
+
 
 epochs = 25
+train_losses = []
 
-for epoch in range(epochs):
-    running_loss = 0
-    for image, labels in train_dataloader:
-        # this flattens the image from a 28x28 square to a 782-dimesional vector
-        image = image.view(image.shape[0], -1)
-        # resets graidents of model param to 0 so it doesn't accumulate, giving us the wrong values
+def train(epoch):
+    network.train()
+    for batch_id, (data, target) in enumerate(train_dataloader):
         optimizer.zero_grad()
-        # pass the image to the model
-        output = model(image)
-        # use NLLLoss to get diff. between true labels and log-probabilities and compute the negative log-likelihood
-        loss = criterion(output, labels)
-        # calculates how much each param contributes to overall loss
+        output = network(data)
+        loss = F.nll_loss(output, target)
         loss.backward()
-        #update the model's params with new values for the next epoch
         optimizer.step()
-        # update running loss
-        running_loss += loss.item()
-    else:
-        print("Epoch {} - Training loss: {}".format(epoch, running_loss/len(train_dataloader)))
+        if batch_id % 10 == 0:
+            print("Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}".format(
+            epoch, batch_id * len(data), len(train_dataloader.dataset),
+            100. * batch_id / len(train_dataloader), loss.item()))
+        train_losses.append((batch_id*64) + ((epoch-1) * len(train_dataloader.dataset)))
+        torch.save(network.state_dict(), 'results/model.pth')
+        torch.save(optimizer.state_dict(), 'results/optimizer.pth')
 
-torch.save(model, './my_mnist_model.pt')
+test_losses = []
+
+def test():
+    network.eval()
+    test_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for data, target in test_dataloader:
+            output = network(data)
+            test_loss += F.nll_loss(output, target, reduction='sum').item()
+            pred = output.data.max(1, keepdim = True)[1]
+            correct += pred.eq(target.data.view_as(pred)).sum()
+            test_loss /= len(test_dataloader.dataset)
+            test_losses.append(test_loss)
+            print('\nTest set: Avg. loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+    test_loss, correct, len(test_dataloader.dataset),
+    100. * correct / len(test_dataloader.dataset)))
+            
+test()
+for epoch in range(1, 4):
+    train(epoch)
+    test()
